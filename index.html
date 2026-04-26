@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <title>Triage Botánico - Diagnóstico con IA</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { margin: 0; background: #f8fafc; -webkit-tap-highlight-color: transparent; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spin { animation: spin 1s linear infinite; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="react">
+        const { useState, useRef } = React;
+
+        // ========================================
+        // 👇 PEGÁ TU API KEY DE GEMINI ACÁ ABAJO 👇
+        // ========================================
+        const GEMINI_API_KEY = "AIzaSyB55rHPrZPrshrwp8MQP-blq6vcZQQmQzM";
+        // ========================================
+
+        const SYMPTOMS = [
+            { id: 'yellow_leaves', label: 'Hojas amarillas', icon: '🍃' },
+            { id: 'brown_tips', label: 'Puntas marrones/secas', icon: '🍂' },
+            { id: 'droopy', label: 'Hojas caídas o lacias', icon: '🥀' },
+            { id: 'spots', label: 'Manchas negras o blancas', icon: '🌑' },
+            { id: 'mushy_stem', label: 'Tallo blando o negruzco', icon: '🪵' },
+            { id: 'wet_soil', label: 'Sustrato empapado/huele mal', icon: '💧' },
+            { id: 'bone_dry', label: 'Sustrato duro y muy seco', icon: '🏜️' },
+            { id: 'pests', label: 'Bichitos o telarañas', icon: '🕷️' }
+        ];
+
+        const CARE_GUIDES = {
+            'overwater': {
+                immediate: "Retira el exceso de agua. Saca el cepellón de la maceta y envuélvelo en papel absorbente.",
+                seven_days: "No riegues. Mantén la planta con mucha luz indirecta y buena ventilación.",
+                signs: "El tallo recupera firmeza y las hojas nuevas dejan de nacer amarillas.",
+                tools: ["Papel absorbente", "Tijeras desinfectadas", "Sustrato drenante"]
+            },
+            'underwater': {
+                immediate: "Riego por inmersión 20 minutos. Pulveriza las hojas si la planta lo permite.",
+                seven_days: "Vigila la humedad cada 2 días. No dejes que el sustrato se separe de la maceta.",
+                signs: "Las hojas recuperan turgencia (se ponen firmes y dejan de colgar).",
+                tools: ["Recipiente con agua templada", "Pulverizador", "Palito de madera"]
+            },
+            'pests_detected': {
+                immediate: "Aísla la planta. Limpia cada hoja por ambos lados con jabón potásico.",
+                seven_days: "Repite el tratamiento cada 3 días. Revisa las plantas vecinas.",
+                signs: "Desaparición de puntos móviles, telarañas o melaza pegajosa.",
+                tools: ["Jabón potásico o Aceite de Neem", "Paño de microfibra", "Lupa"]
+            },
+            'default': {
+                immediate: "Evita cambios bruscos de temperatura o corrientes de aire.",
+                seven_days: "Mantén un diario de riego y luz para identificar patrones de estrés.",
+                signs: "Aparición de brotes nuevos o mantenimiento del color.",
+                tools: ["Diario de plantas", "Medidor de luz"]
+            }
+        };
+
+        const DIAGNOSES = [
+            { id: 'overwater', title: 'Exceso de Riego (Pudrición)', severity: 'danger',
+              probability: (s) => (s.includes('yellow_leaves') && s.includes('mushy_stem')) || s.includes('wet_soil') ? 90 : 0,
+              advice: 'Deja de regar INMEDIATAMENTE. Saca la planta y revisa si las raíces están negras.',
+              not_do: 'No añadas fertilizante ni riegues "por si acaso".' },
+            { id: 'underwater', title: 'Deshidratación Crítica', severity: 'warning',
+              probability: (s) => (s.includes('droopy') && s.includes('bone_dry')) || (s.includes('brown_tips') && s.includes('bone_dry')) ? 85 : 0,
+              advice: 'Riego por inmersión: sumerge la maceta en un balde con agua por 15 min.',
+              not_do: 'No la pongas al sol directo ahora; está débil.' },
+            { id: 'pests_detected', title: 'Posible Plaga', severity: 'danger',
+              probability: (s) => s.includes('pests') || s.includes('spots') ? 80 : 0,
+              advice: 'Aísla la planta. Limpia las hojas con jabón potásico o aceite de neem.',
+              not_do: 'No la dejes cerca de tus otras plantas o se contagiarán.' }
+        ];
+
+        function App() {
+            const [step, setStep] = useState('welcome');
+            const [selectedSymptoms, setSelectedSymptoms] = useState([]);
+            const [result, setResult] = useState(null);
+            const [error, setError] = useState(null);
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const streamRef = useRef(null);
+
+            const startCamera = async () => {
+                setError(null);
+                try {
+                    const mediaStream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: 'environment' }
+                    });
+                    streamRef.current = mediaStream;
+                    setStep('camera');
+                    setTimeout(() => {
+                        if (videoRef.current) videoRef.current.srcObject = mediaStream;
+                    }, 100);
+                } catch (err) {
+                    setError("No se pudo acceder a la cámara. Revisa los permisos del navegador.");
+                }
+            };
+
+            const stopCamera = () => {
+                if (streamRef.current) {
+                    streamRef.current.getTracks().forEach(t => t.stop());
+                    streamRef.current = null;
+                }
+            };
+
+            const captureAndAnalyze = async () => {
+                if (!videoRef.current || !canvasRef.current) return;
+                const video = videoRef.current;
+                const canvas = canvasRef.current;
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                canvas.getContext('2d').drawImage(video, 0, 0);
+                const base64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+                stopCamera();
+                setStep('analyzing');
+
+                if (!GEMINI_API_KEY || GEMINI_API_KEY === "PEGA_TU_API_KEY_ACA") {
+                    setError("Falta configurar tu API key de Gemini en el código.");
+                    setStep('welcome');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(
+                        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{
+                                    parts: [
+                                        { text: `Eres un experto botánico. Analiza esta imagen de una planta. Devuelve SOLO un JSON válido (sin markdown, sin explicaciones extra) con esta estructura exacta:
+{
+  "id": "overwater" | "underwater" | "pests_detected" | "default",
+  "title": "nombre corto del problema en español",
+  "severity": "danger" | "warning" | "info",
+  "advice": "qué hacer ahora mismo, en español, máximo 2 frases",
+  "not_do": "qué evitar, en español, máximo 1 frase",
+  "confidence": número entre 0 y 100
+}` },
+                                        { inline_data: { mime_type: "image/jpeg", data: base64 } }
+                                    ]
+                                }]
+                            })
+                        }
+                    );
+
+                    if (!response.ok) {
+                        const errData = await response.text();
+                        throw new Error('API: ' + errData);
+                    }
+
+                    const data = await response.json();
+                    let text = data.candidates[0].content.parts[0].text;
+                    text = text.replace(/```json|```/g, '').trim();
+                    const aiResult = JSON.parse(text);
+                    setResult({ ...aiResult, score: aiResult.confidence, isAi: true });
+                    setStep('result');
+                } catch (err) {
+                    console.error(err);
+                    setError("Error analizando la imagen: " + err.message);
+                    setStep('welcome');
+                }
+            };
+
+            const runManualDiagnostic = () => {
+                const scores = DIAGNOSES.map(d => ({ ...d, score: d.probability(selectedSymptoms) }))
+                    .sort((a, b) => b.score - a.score);
+                const finalResult = scores[0].score > 0 ? scores[0] : {
+                    id: 'default', title: 'Diagnóstico Inconcluso', severity: 'info',
+                    advice: 'Los síntomas no son claros. Probá con el análisis visual con cámara.',
+                    not_do: 'No apliques químicos sin estar seguro.', score: 50
+                };
+                setResult(finalResult);
+                setStep('result');
+            };
+
+            const reset = () => {
+                stopCamera();
+                setStep('welcome');
+                setSelectedSymptoms([]);
+                setResult(null);
+                setError(null);
+            };
+
+            const guide = result ? (CARE_GUIDES[result.id] || CARE_GUIDES['default']) : CARE_GUIDES['default'];
+
+            const sevColor = (s) => s === 'danger' ? 'bg-rose-50 text-rose-900' : s === 'warning' ? 'bg-amber-50 text-amber-900' : 'bg-blue-50 text-blue-900';
+
+            return (
+                <div className="min-h-screen py-4 px-3 sm:py-8 sm:px-4">
+                    <div className="max-w-xl mx-auto bg-white shadow-2xl rounded-3xl overflow-hidden border border-slate-100">
+
+                        <div className="bg-emerald-600 p-5 text-white flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-white/20 p-2 rounded-xl">🌱</div>
+                                <div>
+                                    <h1 className="font-bold text-lg leading-tight">Triage Botánico</h1>
+                                    <p className="text-emerald-100 text-[10px] uppercase tracking-widest font-semibold">IA Vision System</p>
+                                </div>
+                            </div>
+                            {step !== 'welcome' && (
+                                <button onClick={reset} className="p-2 hover:bg-white/10 rounded-full">↻</button>
+                            )}
+                        </div>
+
+                        <div className="p-5 sm:p-6">
+                            {step === 'welcome' && (
+                                <div className="space-y-6 text-center py-4 fade-in">
+                                    <div className="bg-emerald-50 w-24 h-24 rounded-full flex items-center justify-center mx-auto border-4 border-white shadow-xl text-4xl">📷</div>
+                                    <div className="space-y-2">
+                                        <h2 className="text-2xl font-black text-slate-800 uppercase">¿Planta en problemas?</h2>
+                                        <p className="text-slate-500">Analiza visualmente con IA o completa el test manual.</p>
+                                    </div>
+                                    <div className="space-y-3">
+                                        <button onClick={startCamera} className="w-full bg-emerald-600 active:bg-emerald-700 text-white font-bold py-4 rounded-2xl shadow-lg active:scale-95 transition-all">
+                                            📷 Escanear Planta
+                                        </button>
+                                        <button onClick={() => setStep('quiz')} className="w-full bg-white border-2 border-slate-100 active:border-emerald-200 text-slate-600 font-bold py-4 rounded-2xl">
+                                            Cuestionario Manual →
+                                        </button>
+                                    </div>
+                                    {error && <p className="text-rose-600 text-sm font-medium bg-rose-50 p-3 rounded-xl">{error}</p>}
+                                </div>
+                            )}
+
+                            {step === 'camera' && (
+                                <div className="space-y-4 fade-in">
+                                    <div className="relative aspect-[3/4] bg-black rounded-2xl overflow-hidden">
+                                        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                            <div className="w-48 h-48 border-2 border-white/40 border-dashed rounded-full" />
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-3">
+                                        <button onClick={reset} className="flex-1 bg-slate-100 text-slate-600 font-bold py-4 rounded-2xl">Atrás</button>
+                                        <button onClick={captureAndAnalyze} className="flex-[2] bg-emerald-600 text-white font-bold py-4 rounded-2xl shadow-lg">
+                                            📸 Analizar
+                                        </button>
+                                    </div>
+                                    <canvas ref={canvasRef} className="hidden" />
+                                </div>
+                            )}
+
+                            {step === 'analyzing' && (
+                                <div className="text-center py-16 space-y-4">
+                                    <div className="w-12 h-12 border-4 border-emerald-200 border-t-emerald-600 rounded-full mx-auto spin"></div>
+                                    <h3 className="text-lg font-bold text-slate-800">Procesando imagen…</h3>
+                                    <p className="text-slate-400 text-sm">Identificando texturas, plagas y deshidratación.</p>
+                                </div>
+                            )}
+
+                            {step === 'quiz' && (
+                                <div className="space-y-4 fade-in">
+                                    <div className="grid grid-cols-1 gap-2">
+                                        {SYMPTOMS.map(s => (
+                                            <button key={s.id}
+                                                onClick={() => setSelectedSymptoms(p => p.includes(s.id) ? p.filter(i => i !== s.id) : [...p, s.id])}
+                                                className={`flex items-center justify-between p-4 rounded-2xl border-2 text-left ${selectedSymptoms.includes(s.id) ? 'border-emerald-500 bg-emerald-50' : 'border-slate-100'}`}>
+                                                <span className="flex items-center gap-3 font-semibold text-slate-700">
+                                                    <span className="text-2xl">{s.icon}</span> {s.label}
+                                                </span>
+                                                <div className={`w-5 h-5 rounded-full border-2 ${selectedSymptoms.includes(s.id) ? 'bg-emerald-500 border-emerald-500' : 'border-slate-200'}`} />
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <button onClick={runManualDiagnostic} disabled={selectedSymptoms.length === 0}
+                                        className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold disabled:opacity-30">
+                                        Evaluar Planta
+                                    </button>
+                                </div>
+                            )}
+
+                            {step === 'result' && result && (
+                                <div className="space-y-5 fade-in">
+                                    <div className={`p-6 rounded-3xl text-center space-y-3 ${sevColor(result.severity)}`}>
+                                        <h2 className="text-2xl font-black">{result.title}</h2>
+                                        <div className="inline-flex px-3 py-1 bg-white/50 rounded-full text-[10px] font-bold uppercase tracking-widest">
+                                            Confianza: {result.score}%
+                                        </div>
+                                    </div>
+                                    <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                                        <h3 className="font-bold text-emerald-800 mb-1 text-sm">✓ Veredicto:</h3>
+                                        <p className="text-emerald-900 text-sm leading-relaxed">{result.advice}</p>
+                                    </div>
+                                    <div className="p-4 bg-rose-50 rounded-2xl border border-rose-100">
+                                        <h3 className="font-bold text-rose-800 mb-1 text-sm">✗ Evitá:</h3>
+                                        <p className="text-rose-900 text-sm leading-relaxed">{result.not_do}</p>
+                                    </div>
+                                    <button onClick={() => setStep('guide')}
+                                        className="w-full bg-indigo-600 text-white font-bold py-4 rounded-2xl shadow-xl">
+                                        Ver Guía de Recuperación →
+                                    </button>
+                                </div>
+                            )}
+
+                            {step === 'guide' && result && (
+                                <div className="space-y-4 fade-in pb-2">
+                                    <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                                        <div className="bg-indigo-100 p-2 rounded-xl">🩺</div>
+                                        <div>
+                                            <h2 className="font-black text-slate-800">Plan de Recuperación</h2>
+                                            <p className="text-xs text-slate-400 font-bold uppercase">Caso: {result.title}</p>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                        <div className="text-indigo-600 font-bold text-sm uppercase mb-2">📅 Primeras 24 Horas</div>
+                                        <p className="text-slate-600 text-sm">{guide.immediate}</p>
+                                    </div>
+                                    <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                        <div className="text-emerald-600 font-bold text-sm uppercase mb-2">💚 Hoja de Ruta (7 Días)</div>
+                                        <p className="text-slate-600 text-sm">{guide.seven_days}</p>
+                                    </div>
+                                    <div className="bg-slate-50 p-5 rounded-2xl">
+                                        <div className="text-slate-700 font-bold text-sm uppercase mb-3">🌱 Kit Necesario</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {guide.tools.map((t, i) => (
+                                                <span key={i} className="bg-white px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 border border-slate-200">{t}</span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="bg-blue-50 p-5 rounded-2xl border border-blue-100">
+                                        <div className="text-blue-700 font-bold text-sm uppercase mb-2">🛡️ Signos de Éxito</div>
+                                        <p className="text-blue-900 text-sm italic">"{guide.signs}"</p>
+                                    </div>
+                                    <button onClick={reset} className="w-full bg-slate-100 text-slate-600 font-bold py-4 rounded-2xl">Volver al Inicio</button>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="bg-slate-50 p-3 text-center border-t border-slate-100">
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.3em]">Masterclass: Rescate Botánico</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
